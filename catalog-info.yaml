@@ -7,8 +7,8 @@ metadata:
   labels:
     system: brand-safety
     team: internal-tools
-annotations:
-  bitbucket.org/project-slug: https://bitbucket.org/spotter-research-dev/brand-safety/src/main/entry/
+  annotations:
+    bitbucket.org/project-slug: https://bitbucket.org/spotter-research-dev/brand-safety/src/main/entry/
 spec:
   # Type of the component: service, website, library, etc.
   type: service
