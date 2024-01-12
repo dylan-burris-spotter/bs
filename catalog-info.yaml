@@ -1,0 +1,20 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: brand-safety-entry
+  description: Handles file uploads for S3
+  # Labels help in organizing and finding components
+  labels:
+    system: brand-safety
+    team: internal-tools
+annotations:
+  bitbucket.org/project-slug: https://bitbucket.org/spotter-research-dev/brand-safety/src/main/entry/
+spec:
+  # Type of the component: service, website, library, etc.
+  type: service
+  # Lifecycle stage: experimental, production, deprecated, etc.
+  lifecycle: production
+  # Owner of the component, typically a team name
+  owner: internal-tools
+  # System that the component belongs to (optional)
+  system: brand-safety
