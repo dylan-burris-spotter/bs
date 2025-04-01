@@ -1,0 +1,336 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: EC2 Stack for BrandSafety downloading.
+
+Parameters:
+  ProjectTag:
+    Type: String
+    Description: The name of the project
+    Default: BrandSafety
+    AllowedPattern: "^[0-9a-zA-Z.-]+$"
+    ConstraintDescription: Project name must only contain alphanumeric characters or hyphens.
+
+  EnvironmentTag:
+    Type: String
+    Description: The name of the environment
+    Default: Prod
+    AllowedPattern: "^[0-9a-zA-Z.-]+$"
+    ConstraintDescription: Environment name must only contain alphanumeric characters or hyphens.
+
+  TeamTag:
+    Type: String
+    Description: The name of the team
+    Default: InternalTools
+    AllowedPattern: "^[0-9a-zA-Z.-]+$"
+    ConstraintDescription: Team name must only contain alphanumeric characters or hyphens.
+
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Description: The latest ECS-optimized AMI for ARM instances
+    Default: '/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id'
+
+Resources:
+
+  BrandSafetyDownloaderDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: brand-safety-downloader-dlq
+
+  BrandSafetyDownloaderQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: brand-safety-downloader
+      VisibilityTimeout: 3600
+      MessageRetentionPeriod: 1209600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt BrandSafetyDownloaderDLQ.Arn
+        maxReceiveCount: 5
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: BrandSafety
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - !Ref ECSLoggingPolicy
+
+  ECSLoggingPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Policy for ECS logging
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:CreateLogGroup
+              - logs:PutLogEvents
+            Resource: '*'
+
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+      Policies:
+        - PolicyName: DynamoDBAccessPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:*
+                Resource:
+                 - 'arn:aws:dynamodb:*:*:table/Video-Data'
+                 - 'arn:aws:dynamodb:*:*:table/BrandSafety-Transactions'
+        - PolicyName: SQSPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:*
+                Resource:
+                  - !GetAtt BrandSafetyDownloaderQueue.Arn
+        - PolicyName: SNSTopicPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:*
+                Resource:
+                  - !ImportValue brand-safety-download-topic-arn
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !Sub 'arn:aws:s3:::{{resolve:ssm:/brand-safety/download-bucket-name}}'
+                  - !Sub 'arn:aws:s3:::{{resolve:ssm:/brand-safety/download-bucket-name}}/*'
+        - PolicyName: CloudWatchMetricsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:CreateLogStream
+                Resource: '*'
+
+
+  EcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: BrandSafety-Downloader
+      NetworkMode: bridge
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: BrandSafety-Downloader
+          Cpu: 1024
+          Memory: 4096
+          MemoryReservation: 2048
+          MountPoints:
+            - SourceVolume: Downloads
+              ContainerPath: /mnt/downloads
+          Environment:
+            - Name: LOG_LEVEL
+              Value: DEBUG
+            - Name: DYNAMODB_DATA_TABLE
+              Value: '{{resolve:ssm:/brand-safety/data-table}}'
+            - Name: QUEUE_URL
+              Value: !Sub 'https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/brand-safety-downloader'
+            - Name: QUEUE_NAME
+              Value: brand-safety-downloader
+            - Name: DESTINATION_BUCKET
+              Value: '{{resolve:ssm:/brand-safety/download-bucket-name}}'
+            - Name: EFS_MOUNT_PATH
+              Value: /mnt/downloads
+            - Name: PROXY
+              Value: '{{resolve:ssm:/brand-safety/download-proxy}}'
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: SNS_TOPIC_ARN
+              Value: !ImportValue brand-safety-download-topic-arn
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - python health.py || exit 1
+            Interval: 30
+            Retries: 3
+            Timeout: 5
+            StartPeriod: 3
+          Image: !ImportValue brand-safety-downloader-ecr-uri
+          PortMappings:
+            - ContainerPort: 5000
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /BrandSafety
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+              awslogs-create-group: true
+      Volumes:
+        - Name: Downloads
+          Host:
+            SourcePath: /mnt/downloads
+
+  EcsService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: BrandSafety-Downloader
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref EcsTaskDefinition
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref EcsCapacityProvider
+          Weight: 1
+          Base: 1
+      DesiredCount: 4
+      PlacementStrategies:
+        - Field: memory
+          Type: binpack
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+
+
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: BrandSafetyInstanceRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - 'ec2.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Path: '/'
+      Policies:
+        - PolicyName: 'ECSInstancePolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:*
+                  - sqs:*
+                  - dynamodb:*
+                  - s3:*
+                  - cloudwatch:*
+                  - ssm:UpdateInstanceInformation
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                  - kms:Decrypt
+                Resource: '*'
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: '/'
+      Roles:
+        - Ref: 'EcsInstanceRole'
+
+
+  EcsEc2LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: BrandSafety-Downloader
+      VersionDescription: Initial version
+      LaunchTemplateData:
+        InstanceType: m7gd.4xlarge
+        ImageId: !Ref ImageId
+        IamInstanceProfile:
+          Name: !Ref EcsInstanceProfile
+        UserData:
+          Fn::Base64:
+            !Sub |
+              #!/bin/bash
+              echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config
+              systemctl enable amazon-ssm-agent
+              systemctl start amazon-ssm-agent
+              if [ ! -e /dev/nvme1n1p1 ]; then
+                  # Format the device
+                  mkfs.ext4 /dev/nvme1n1
+              fi
+              mkdir -p /mnt/downloads
+              mount /dev/nvme1n1 /mnt/downloads
+              # Mount after reboot
+              echo '/dev/nvme1n1 /mnt/downloads ext4 defaults,nofail 0 2' >> /etc/fstab
+
+  EcsEc2AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: BrandSafety-Downloader
+      # NewInstancesProtectedFromScaleIn: true
+      LaunchTemplate:
+        LaunchTemplateId: !Ref EcsEc2LaunchTemplate
+        Version: !GetAtt EcsEc2LaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 10
+      DesiredCapacity: 1
+      VPCZoneIdentifier:
+        - !ImportValue brand-safety-private-subnet-1
+        - !ImportValue brand-safety-private-subnet-2
+      Tags:
+        - Key: Name
+          Value: BrandSafety Downloader
+          PropagateAtLaunch: true
+    DependsOn:
+      - EcsEc2LaunchTemplate
+
+  EcsCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref EcsEc2AutoScalingGroup
+        ManagedScaling:
+          Status: ENABLED
+          TargetCapacity: 100
+        # ManagedTerminationProtection: ENABLED
+
+  CapacityProviderAssociation:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      Cluster: !Ref EcsCluster
+      CapacityProviders:
+        - !Ref EcsCapacityProvider
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: !Ref EcsCapacityProvider
+          Weight: 1
+    DependsOn:
+      - EcsCapacityProvider
+
