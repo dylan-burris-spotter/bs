@@ -1,0 +1,372 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation template for creating a CodePipeline with CodeStar source and deploying a CloudFormation stack.
+
+Parameters:
+  BuildspecDir:
+    Type: String
+    Default: AWS::NoValue
+    Description: The location of the buildspec.yml file.
+
+  CodeStarArn:
+    Type: String
+    Default: AWS::NoValue
+    Description: The ARN of the CodeStar connection.
+
+  ProjectName:
+    Type: String
+    Default: AWS::NoValue
+    Description: The name of the CodeBuild project.
+
+  BranchName:
+    Type: String
+    Default: main
+    Description: The branch name for the GitHub repository.
+
+  FullRepositoryId:
+    Type: String
+    Default: AWS::NoValue
+    Description: The full repository ID for the GitHub repository.
+
+
+Resources:
+
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${ProjectName}-build"
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: ARM_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: BUILDSPEC_DIR
+            Value: !Ref BuildspecDir
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub "${BuildspecDir}/buildspec.yml"
+
+  CodeBuildRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: codebuild.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/AWSCodeBuildAdminAccess
+          - arn:aws:iam::aws:policy/AWSCloudFormationFullAccess
+          - arn:aws:iam::aws:policy/AmazonS3FullAccess
+          - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+          - arn:aws:iam::aws:policy/IAMFullAccess
+
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Ref ProjectName
+      RoleArn: !GetAtt PipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !ImportValue CodePipelineBucketName
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeStarSourceConnection
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                ConnectionArn: !Ref CodeStarArn
+                FullRepositoryId: !Ref FullRepositoryId
+                BranchName: !Ref BranchName
+                DetectChanges: false
+
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+
+        - Name: DeployCFN
+          Actions:
+            - Name: DeployAction
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              InputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: BrandSafety-Video-Downloader
+                Capabilities: CAPABILITY_NAMED_IAM
+                TemplatePath: SourceOutput::video_downloader/stack-ec2.yml
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+
+        - Name: DeployCFNScaling
+          Actions:
+            - Name: DeployAction
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              InputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: BrandSafety-Video-Downloader-Scaling
+                Capabilities: CAPABILITY_NAMED_IAM
+                TemplatePath: SourceOutput::video_downloader/stack-ec2-scaling.yml
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+
+        - Name: DeployECS
+          Actions:
+            - Name: DeployActionECS
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: ECS
+              InputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ClusterName: BrandSafety
+                ServiceName: BrandSafety-Downloader
+                FileName: imagedefinitions.json
+
+  CloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudformation.amazonaws.com
+        Version: 2012-10-17
+      Policies:
+        - PolicyName: CloudFormationAccess
+          PolicyDocument:
+            Statement:
+              - Action:
+                 - s3:*
+                 - cloudformation:*
+                 - iam:*
+                 - ecs:*
+                 - sqs:*
+                 - efs:*
+                 - elasticfilesystem:*
+                 - ecr:*
+                 - ec2:*
+                 - autoscaling:*
+                 - ssm:GetParameters
+                 - application-autoscaling:*
+                 - cloudwatch:*
+                Effect: Allow
+                Resource: "*"
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeStarFullAccess
+        - arn:aws:iam::aws:policy/AWSCloudFormationFullAccess
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+  ArtifactBucketPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: ArtifactBucketAccess
+      Roles:
+        - !Ref PipelineRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:GetObject'
+              - 's3:PutObject'
+              - 's3:ListBucket'
+              - 's3:GetBucketAcl'
+            Resource:
+              - !ImportValue CodePipelineBucketArn
+              - Fn::Join:
+                  - ''
+                  - - !ImportValue CodePipelineBucketArn
+                    - '/*'
+
+
+  PipelinePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CodeStarConnectionAccess
+      Roles:
+        - !Ref PipelineRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 'codestar-connections:UseConnection'
+            Resource: !Ref CodeStarArn
+
+  PipelineEcsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CodePipelineEcsAccess
+      Roles:
+        - !Ref PipelineRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "codepipeline:*"
+              - "ecs:*"
+              - "ecr:*"
+              - "iam:PassRole"
+            Resource: "*"
+
+
+  CodeBuildPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CodeBuildAccess
+      Roles:
+        - !Ref PipelineRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'codebuild:StartBuild'
+              - 'codebuild:BatchGetBuilds'
+              - 'codebuild:BatchGetProjects'
+              - 'codebuild:ListBuilds'
+            Resource: '*'
+
+  CodeBulidCodeArtifactPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CodeBuildCodeArtifactAccess
+      Roles:
+        - !Ref CodeBuildRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'codeartifact:GetAuthorizationToken'
+              - 'codeartifact:GetRepositoryEndpoint'
+              - 'codeartifact:ReadFromRepository'
+            Resource: '*'
+
+  CodeBuildStsPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Description: 'A policy that allows sts:GetServiceBearerToken for codeartifact.amazonaws.com'
+      Roles:
+        - !Ref CodeBuildRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action: 'sts:GetServiceBearerToken'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'sts:AWSServiceName': 'codeartifact.amazonaws.com'
+
+  CodeBuildECRPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CodeBuildECRAccess
+      Roles:
+        - !Ref CodeBuildRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'ecr:GetAuthorizationToken'
+              - 'ecr:BatchCheckLayerAvailability'
+              - 'ecr:GetDownloadUrlForLayer'
+              - 'ecr:GetRepositoryPolicy'
+              - 'ecr:DescribeRepositories'
+              - 'ecr:ListImages'
+              - 'ecr:DescribeImages'
+              - 'ecr:BatchGetImage'
+              - 'ecr:InitiateLayerUpload'
+              - 'ecr:UploadLayerPart'
+              - 'ecr:CompleteLayerUpload'
+              - 'ecr:PutImage'
+              - 'ecs:*'
+            Resource: '*'
+
+  CodeBuildLogsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CodeBuildCloudWatchLogsPolicy
+      Roles:
+        - !Ref CodeBuildRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Resource: '*'
+
+  CodeBuildS3Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CodeBuildS3Access
+      Roles:
+        - !Ref CodeBuildRole
+        - !Ref PipelineRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:GetObject'
+              - 's3:GetObjectVersion'
+              - 's3:GetBucketVersioning'
+              - 's3:PutObject'
+            Resource:
+              - !ImportValue CodePipelineBucketArn
