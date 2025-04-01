@@ -1,0 +1,358 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation Template: VPC with 2 AZs, each having a public and a private subnet with NAT gateway"
+
+Parameters:
+
+  TransitGatewayId:
+    Type: String
+    Description: The ID of the Transit Gateway to attach to.
+    Default: AWS::NoValue
+
+Resources:
+
+  # VPC
+  BrandSafety:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.24.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: BrandSafety
+
+  # Internet Gateway
+  BrandSafetyIGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: BrandSafety IGW
+
+  # Attach IGW to VPC
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref BrandSafety
+      InternetGatewayId: !Ref BrandSafetyIGW
+
+  SubnetsPrivate1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref BrandSafety
+      CidrBlock: 10.24.0.0/19
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: BrandSafety Private A
+
+  SubnetsPrivate2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref BrandSafety
+      CidrBlock: 10.24.32.0/19
+      AvailabilityZone: !Sub "${AWS::Region}b"
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: BrandSafety Private B
+
+  SubnetsPrivate3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref BrandSafety
+      CidrBlock: 10.24.64.0/19
+      AvailabilityZone: !Sub "${AWS::Region}c"
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: BrandSafety Private C
+
+
+  SubnetsPublic1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref BrandSafety
+      CidrBlock: 10.24.96.0/19
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: BrandSafety Public A
+
+  SubnetsPublic2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref BrandSafety
+      CidrBlock: 10.24.128.0/19
+      AvailabilityZone: !Sub "${AWS::Region}b"
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: BrandSafety Public B
+
+  SubnetsPublic3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref BrandSafety
+      CidrBlock: 10.24.160.0/19
+      AvailabilityZone: !Sub "${AWS::Region}c"
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: BrandSafety Public C
+
+  # NAT gateway
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref SubnetsPublic1
+      Tags:
+        - Key: Name
+          Value: BrandSafety NAT Gateway A
+
+  #Public Route Table
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref BrandSafety
+      Tags:
+        - Key: Name
+          Value: BrandSafety Public Route Table
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref BrandSafetyIGW
+
+  PublicSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetsPublic1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetsPublic2
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetRouteTableAssociation3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetsPublic3
+      RouteTableId: !Ref PublicRouteTable
+
+  # Routes for private subnets
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref BrandSafety
+
+  PrivateRoute1:
+    Type: AWS::EC2::Route
+    DependsOn: NatGateway
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetsPrivate1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  PrivateSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetsPrivate2
+      RouteTableId: !Ref PrivateRouteTable1
+
+  PrivateSubnetRouteTableAssociation3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetsPrivate3
+      RouteTableId: !Ref PrivateRouteTable1
+
+
+  # Transit Gateway
+#  TransitGateway:
+#    Type: AWS::EC2::TransitGateway
+#    Properties:
+#      Description: BrandSafety Transit Gateway
+#      AmazonSideAsn: 64512
+#      TransitGatewayCidrBlocks:
+#        - 10.24.96.0/19
+#        - 10.24.128.0/19
+#        - 10.24.160.0/19
+#      Tags:
+#        - Key: Name
+#          Value: BrandSafety-TransitGateway
+
+  TransitGatewayAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      SubnetIds:
+        - !Ref SubnetsPublic1
+        - !Ref SubnetsPublic2
+        - !Ref SubnetsPublic3
+      TransitGatewayId: !Ref TransitGatewayId
+      VpcId: !Ref BrandSafety
+      Tags:
+        - Key: Name
+          Value: tgw-attachment-vpc-BrandSafety
+
+
+  TransitGatewayRoutePublic1:
+    Type: AWS::EC2::Route
+    DependsOn: TransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 10.100.0.0/16
+      TransitGatewayId: !Ref TransitGatewayId
+
+  TransitGatewayRoutePublic2:
+    Type: AWS::EC2::Route
+    DependsOn: TransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 10.200.0.0/16
+      TransitGatewayId: !Ref TransitGatewayId
+
+  TransitGatewayRoutePrivate1:
+      Type: AWS::EC2::Route
+      DependsOn: TransitGatewayAttachment
+      Properties:
+        RouteTableId: !Ref PrivateRouteTable1
+        DestinationCidrBlock: 10.100.0.0/16
+        TransitGatewayId: !Ref TransitGatewayId
+
+  TransitGatewayRoutePrivate2:
+    Type: AWS::EC2::Route
+    DependsOn: TransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 10.200.0.0/16
+      TransitGatewayId: !Ref TransitGatewayId
+
+
+  # Endpoints
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref BrandSafety
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      RouteTableIds:
+          - !Ref PrivateRouteTable1
+
+  DynamoDBEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref BrandSafety
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.dynamodb"
+      RouteTableIds:
+          - !Ref PrivateRouteTable1
+
+  SQSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for VPC Endpoint
+      VpcId: !Ref BrandSafety
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: '-1'
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: '-1'
+
+
+  SQSEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref BrandSafety
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sqs"
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref SubnetsPrivate1
+        - !Ref SubnetsPrivate2
+        - !Ref SubnetsPrivate3
+      SecurityGroupIds:
+        - !Ref SQSSecurityGroup
+      PrivateDnsEnabled: true
+
+  OpenSearchServerlessSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for OpenSearch Serverless Endpoint
+      VpcId: !Ref BrandSafety
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: '-1'
+
+  OpenSearchServerlessEndpoint:
+    Type: AWS::OpenSearchServerless::VpcEndpoint
+    Properties:
+      Name: video-aoss-endpoint
+      VpcId: !Ref BrandSafety
+      SecurityGroupIds:
+        - !Ref OpenSearchServerlessSecurityGroup
+      SubnetIds:
+        - !Ref SubnetsPrivate1
+        - !Ref SubnetsPrivate2
+        - !Ref SubnetsPrivate3
+
+Outputs:
+  BrandSafetyVPCID:
+    Description: 'The ID of the VPC'
+    Value: !Ref BrandSafety
+    Export:
+      Name: !Sub "brand-safety-vpc-id"
+
+  BrandSafetyPublicSubnet1:
+    Description: 'The ID of the public subnet in AZ1'
+    Value: !Ref SubnetsPublic1
+    Export:
+      Name: !Sub "brand-safety-public-subnet-1"
+
+  BrandSafetyPublicSubnet2:
+    Description: The ID of the public subnet in AZ2
+    Value: !Ref SubnetsPublic2
+    Export:
+      Name: !Sub "brand-safety-public-subnet-2"
+
+  BrandSafetyPublicSubnet3:
+    Description: The ID of the public subnet in AZ3
+    Value: !Ref SubnetsPublic3
+    Export:
+      Name: !Sub "brand-safety-public-subnet-3"
+
+  BrandSafetyPrivateSubnet1:
+    Description: The ID of the private subnet in AZ1
+    Value: !Ref SubnetsPrivate1
+    Export:
+      Name: !Sub "brand-safety-private-subnet-1"
+
+  BrandSafetyPrivateSubnet2:
+    Description: The ID of the private subnet in AZ2
+    Value: !Ref SubnetsPrivate2
+    Export:
+      Name: !Sub "brand-safety-private-subnet-2"
+
+  BrandSafetyPrivateSubnet3:
+    Description: The ID of the private subnet in AZ3
+    Value: !Ref SubnetsPrivate3
+    Export:
+      Name: !Sub "brand-safety-private-subnet-3"
