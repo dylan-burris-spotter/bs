@@ -1,0 +1,75 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Resources:
+
+  ScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        MaxCapacity: 200
+        MinCapacity: 1
+        ResourceId: service/BrandSafety/BrandSafety-Downloader
+        RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+        ScalableDimension: ecs:service:DesiredCount
+        ServiceNamespace: ecs
+
+
+  ScaleOutPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: ScaleOutPolicy
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 300
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            ScalingAdjustment: 16
+
+
+  ScaleInPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ECS-ScaleDownPolicy
+        PolicyType: StepScaling
+        ScalingTargetId: !Ref ScalableTarget
+        StepScalingPolicyConfiguration:
+          AdjustmentType: ChangeInCapacity
+          StepAdjustments:
+            - MetricIntervalUpperBound: 0
+              ScalingAdjustment: -10
+
+  QueueDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alarm if queue depth goes above 32
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: brand-safety-downloader
+      Statistic: Average
+      Period: 180
+      EvaluationPeriods: 1
+      Threshold: 32
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref ScaleOutPolicy
+
+  ScaleInAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alarm if queue depth drops below 16
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: brand-safety-downloader
+      Statistic: Average
+      Period: 180
+      EvaluationPeriods: 1
+      Threshold: 16
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref ScaleInPolicy
